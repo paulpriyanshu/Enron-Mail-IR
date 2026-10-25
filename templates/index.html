@@ -1,0 +1,72 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enron Email Search</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 16px; color: #222; line-height: 1.5; background: linear-gradient(180deg, #e0e7ff 0%, #f1f5f9 320px) no-repeat, #f1f5f9; min-height: 100vh; }
+    h1 { margin-bottom: 16px; }
+    h1 a { color: #1e3a8a; text-decoration: none; }
+    form { display: flex; gap: 8px; margin-bottom: 24px; }
+    input { flex: 1; max-width: 600px; padding: 10px 14px; font-size: 16px; border: 1px solid #c7d2fe; border-radius: 8px; box-shadow: 0 1px 2px #0000000d; }
+    input:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px #2563eb33; }
+    button { padding: 10px 20px; font-size: 16px; border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+    @media (max-width: 700px) { .columns { grid-template-columns: 1fr; } }
+    .columns > div { background: #fff; border-radius: 12px; padding: 4px 20px 12px; box-shadow: 0 1px 3px #0000001a; }
+    .columns h2 { border-bottom: 2px solid #2563eb; padding-bottom: 4px; }
+    .result:last-child { border-bottom: 0; }
+    .result { border-bottom: 1px solid #e5e5e5; padding: 12px 0; overflow-wrap: anywhere; }
+    .meta { color: #666; font-size: 13px; }
+    pre { white-space: pre-wrap; background: #fff; border: 0; box-shadow: 0 1px 3px #0000001a; border-radius: 8px; padding: 16px; }
+    mark { background: #fde68a; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <h1><a href="/">Enron Email Search</a></h1>
+  <form action="/">
+    <input name="q" value="{{ query }}" placeholder="Search {{ emails|length }} emails..." autofocus>
+    <button>Search</button>
+  </form>
+
+  {% if email %}
+    {# Single email view #}
+    {% if query %}<p><a href="/?q={{ query | urlencode }}">&larr; Back to results</a></p>{% endif %}
+    <h2>{{ (email.subject or "(no subject)") | highlight(query) }}</h2>
+    <p class="meta">
+      From: {{ email["from"] }}<br>
+      To: {{ email["to"] }}<br>
+      Date: {{ email["date"] }}
+    </p>
+    <pre>{{ email.body | highlight(query) }}</pre>
+
+  {% elif query %}
+    {# Search results: TF-IDF and BM25 side by side #}
+    <div class="columns">
+      {% for name, col in columns.items() %}
+        <div>
+          <h2>{{ name }}</h2>
+          <p class="meta">Found {{ col.found }} emails in {{ "%.3f" | format(col.took) }} seconds</p>
+          {% for i, score in col.results %}
+            {% set e = emails[i] %}
+            <div class="result">
+              {{ loop.index }}.
+              <a href="/email/{{ i }}?q={{ query | urlencode }}">
+                <b>{{ (e.subject or "(no subject)") | highlight(query) }}</b>
+              </a>
+              <div class="meta">{{ e["from"] }} · score {{ "%.3f" | format(score) }}</div>
+              <div>{{ e.body[:150] | highlight(query) }}...</div>
+            </div>
+          {% else %}
+            <p>No emails found.</p>
+          {% endfor %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</body>
+</html>

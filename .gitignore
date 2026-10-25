@@ -1,0 +1,6 @@
+.venv/
+emails.csv
+index.pkl
+__pycache__/
+benchmark/data/
+.DS_Store
