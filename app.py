@@ -1,4 +1,4 @@
-"""Web app: search the Enron emails with TF-IDF and BM25 side by side. Run load_data.py first."""
+"""Web app: search the Enron emails with TF-IDF, BIM and BM25 side by side. Run load_data.py first."""
 import pickle
 import re
 import time
@@ -6,7 +6,7 @@ import time
 from flask import Flask, abort, render_template, request
 from markupsafe import Markup, escape
 
-from search_engine import search_bm25, search_tfidf
+from search_engine import search_bim, search_bm25, search_tfidf
 
 app = Flask(__name__)
 
@@ -40,6 +40,7 @@ def home():
     if query:
         columns = {
             "TF-IDF": timed_search(search_tfidf, query, tfidf_index),
+            "BIM": timed_search(search_bim, query, bm25_index),
             "BM25": timed_search(search_bm25, query, bm25_index),
         }
     return render_template("index.html", query=query, columns=columns, emails=emails)

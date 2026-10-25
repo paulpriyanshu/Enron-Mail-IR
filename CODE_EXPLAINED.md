@@ -21,12 +21,13 @@ This guide teaches every file of the project. All example outputs below are **re
 | **`parse_email()`** | **us** | `search_engine.py` |
 | **`email_texts()`, `rank()`** | **us** | `search_engine.py` |
 | **`build_tfidf_index()`, `search_tfidf()`** | **us** (using scikit-learn inside) | `search_engine.py` |
-| **`build_bm25_index()`** | **us** (using `CountVectorizer` for counting) | `search_engine.py` |
+| **`build_bm25_index()`** | **us** (using `CountVectorizer` for counting) — shared by BIM and BM25 | `search_engine.py` |
+| **`search_bim()` — the BIM formula** | **us, entirely** | `search_engine.py` |
 | **`search_bm25()` — the BM25 formula** | **us, entirely** | `search_engine.py` |
 | **Duplicate removal, loading, saving** | **us** | `load_data.py` |
 | **`highlight()`, routes, web page** | **us** | `app.py`, `templates/index.html` |
 
-**In one sentence:** scikit-learn does the *text → numbers* step (tokenising, counting, TF-IDF weights); **we** wrote the search logic — cosine scoring, **the whole BM25 formula**, ranking, data loading and the web app.
+**In one sentence:** scikit-learn does the *text → numbers* step (tokenising, counting, TF-IDF weights); **we** wrote the search logic — cosine scoring, **the whole BIM and BM25 formulas**, ranking, data loading and the web app.
 
 ---
 
@@ -180,7 +181,7 @@ Step by step with `scores = [0, 0.869, 0, 0.319]`:
    matches[[0, 1]]         = [1, 3]
 3. result                  = [(1, 0.869), (3, 0.319)]     ← real output
 ```
-Both algorithms share this function — only the scores differ.
+All three algorithms share this function — only the scores differ.
 
 ### `build_tfidf_index(emails)` (lines 35–39)
 ```python
@@ -209,7 +210,7 @@ matrix @ query.T     251,115 × 1         (one score per email = dot product)
 ```
 **Why is a dot product = cosine similarity?** `cos = (q · e) / (|q| × |e|)`, and `TfidfVectorizer` already made every vector length 1, so `|q| × |e| = 1` → `cos = q · e`.
 
-### `build_bm25_index(emails)` (lines 52–57)
+### `build_bm25_index(emails)` (lines 77–82)
 ```python
 def build_bm25_index(emails):
     counter = CountVectorizer(stop_words="english")                 # scikit-learn: just counting
@@ -220,10 +221,11 @@ def build_bm25_index(emails):
 - BM25 needs **raw counts** (not TF-IDF weights), so we use `CountVectorizer`.
 - `.tocsc()` makes "which emails contain word X?" instant — the inverted index.
 - `doc_len` is needed for length normalisation.
+- BIM uses this **same index** (it only needs to know which emails contain each word), so there is no extra index to build or save.
 
-### `search_bm25(query, index, k1=1.5, b=0.75)` (lines 60–83) — **100% our code**
+### `search_bm25(query, index, k1=0.5, b=0.75)` (lines 85–108) — **100% our code**
 ```python
-def search_bm25(query, index, k1=1.5, b=0.75):
+def search_bm25(query, index, k1=0.5, b=0.75):
     counter, counts, doc_len = index
     n_emails = counts.shape[0]            # N = number of emails (rows)
     avg_len = doc_len.mean()              # average email length
@@ -251,13 +253,57 @@ score += ───────────────────────�
 Walk-through for `"gas pipeline"` on our 3 emails:
 ```
 word "gas":      rows = [0, 1], tf = [2, 1], df = 2, idf = 0.470
-                 scores[[0, 1]] += [0.598, 0.487]    → scores = [0.598, 0.487, 0]
+                 scores[[0, 1]] += [0.533, 0.479]    → scores = [0.533, 0.479, 0]
 word "pipeline": rows = [1],    tf = [2],    df = 1, idf = 0.981
-                 scores[[1]]    += [1.437]           → scores = [0.598, 1.924, 0]
-rank(scores)  → [(1, 1.924), (0, 0.598)]
+                 scores[[1]]    += [1.191]           → scores = [0.533, 1.670, 0]
+rank(scores)  → [(1, 1.670), (0, 0.533)]
 ```
 **Why it's fast:** each word only updates the emails in `rows` — Email 2 is never touched.
 The calculation runs on whole arrays at once (`tf`, `doc_len[rows]` are arrays) — this is called **vectorised** NumPy code, much faster than a Python loop over emails.
+
+**What `k1 = 0.5` does:** the TF part `tf × (k1+1) / (tf + k1)` can never go above `k1 + 1 = 1.5`.
+So repeating a word 50 times gives at most 1.5× the weight of saying it once (1.00, 1.20, 1.36, 1.43, 1.49 for 1, 2, 5, 10, 50 repeats).
+With `k1 = 0` it would be `tf / tf = 1` — exactly BIM.
+
+### `search_bim(query, index)` (lines 52–72) — **100% our code**
+It sits above `build_bm25_index` in the file, but it takes the index that function builds.
+```python
+def search_bim(query, index):
+    counter, counts, doc_len = index      # same index as BM25 (doc_len is not used)
+    n_emails = counts.shape[0]
+    scores = np.zeros(n_emails)
+
+    for word in counter.build_analyzer()(query):
+        col = counter.vocabulary_.get(word)
+        if col is None:
+            continue
+        rows = counts[:, col].indices      # emails containing the word — tf NOT used
+        df = len(rows)
+        scores[rows] += np.log((n_emails - df + 0.5) / (df + 0.5) + 1)   # add the IDF
+
+    return rank(scores)
+```
+Compare it line by line with `search_bm25`: the loop is the same, but BIM only reads `.indices` (which emails),
+never `.data` (how many times), and adds the plain IDF — no `tf`, no `k1`, no `b`, no `doc_len`.
+
+Walk-through for `"gas pipeline"` on our 3 emails:
+```
+word "gas":      rows = [0, 1], df = 2, idf = 0.470
+                 scores[[0, 1]] += 0.470             → scores = [0.470, 0.470, 0]
+word "pipeline": rows = [1],    df = 1, idf = 0.981
+                 scores[[1]]    += 0.981             → scores = [0.470, 1.451, 0]
+rank(scores)  → [(1, 1.451), (0, 0.470)]
+```
+Email 0 says "gas" twice, but it still gets only 0.470: BIM is **binary** (present or absent).
+
+**Why this IDF?** The original BIM weight is `log[p(1−u) / (u(1−p))]`, where `p` = chance the word is in a
+*relevant* email. Nobody has labelled relevant emails (cold start), so we assume `p = 0.5` and `u ≈ df/N`,
+which gives `log((N − df + 0.5) / (df + 0.5))`. The `+ 1` inside the log is the same one BM25 adds, so
+common words never get a negative weight.
+
+**The weakness you'll see in the app:** every email with the same set of query words gets the *same score*,
+so hundreds of emails tie for first place (1,510 for `stock options`).
+`rank()` then orders the tied emails arbitrarily, which is why BIM's top 10 looks random.
 
 ---
 
@@ -341,7 +387,7 @@ def timed_search(search, query, index):          # `search` is a function passed
     return {"results": results[:10], "found": len(results), "took": time.time() - start}
 ```
 
-### Routes (lines 36–52) — which URL runs which function
+### Routes (lines 36–57) — which URL runs which function
 ```python
 @app.route("/")                                  # http://localhost:8000/?q=gas+pipeline
 def home():
@@ -350,6 +396,7 @@ def home():
     if query:
         columns = {
             "TF-IDF": timed_search(search_tfidf, query, tfidf_index),
+            "BIM": timed_search(search_bim, query, bm25_index),     # BIM reuses the BM25 index
             "BM25": timed_search(search_bm25, query, bm25_index),
         }
     return render_template("index.html", query=query, columns=columns, emails=emails)
@@ -385,33 +432,41 @@ Jinja2 is HTML with placeholders that Flask fills in:
 The page has 3 states:
 ```
 {% if email %}        → single email view (from /email/<id>)
-{% elif query %}      → two columns of results: for name, col in columns.items()
+{% elif query %}      → three columns of results: for name, col in columns.items()
 (nothing)             → just the search box
 ```
-The `<style>` block at the top is plain CSS: `.columns` uses CSS **grid** for two columns side by side,
-and a `@media (max-width: 700px)` rule stacks them on phones.
+The `<style>` block at the top is plain CSS: `.columns` uses CSS **grid** for three columns side by side
+(`grid-template-columns: 1fr 1fr 1fr`), and a `@media (max-width: 900px)` rule stacks them on narrow screens.
 
 ---
 
 ## 6. `compare.py` and `test_search.py`
 
-**`compare.py`** — builds both indexes on 5 hand-made emails and prints both rankings:
+**`compare.py`** — 7 hand-made emails, designed so each algorithm puts a **different** email first for
+the query `gas pipeline explosion`:
 ```python
 if __name__ == "__main__":       # runs only with `python compare.py`, not when imported
-    show("TF-IDF ...", search_tfidf(QUERY, build_tfidf_index(EMAILS)))
-    show("BM25:",      search_bm25(QUERY, build_bm25_index(EMAILS)))
+    show("TF-IDF ...", search_tfidf(QUERY, build_tfidf_index(EMAILS)))   # → "Explosion" (tiny email)
+    show("BIM ...",    search_bim(QUERY, build_bm25_index(EMAILS)))      # → "Weekly operations report"
+    show("BM25 ...",   search_bm25(QUERY, build_bm25_index(EMAILS)))     # → "Pipeline explosion near Houston"
 ```
-The saturation table uses the BM25 TF part at average length: `tf * 2.5 / (tf + 1.5)` = `tf × (k1+1) / (tf + k1)`.
+- Email 0, `"Explosion!"`: tiny, so its TF-IDF vector points almost straight at the query, which gives a big cosine.
+- Email 2, a long newsletter: the only email with **all 3** query words, each said once in passing, so BIM picks it.
+- Email 1, the real report: "pipeline" ×4 and "explosion" ×3 in a normal-length email, so BM25 picks it.
+
+The saturation table uses the BM25 TF part at average length: `tf * 1.5 / (tf + 0.5)` = `tf × (k1+1) / (tf + k1)` with k1 = 0.5.
 
 **`test_search.py`** — plain `assert` statements; if any is false, Python stops with an error:
 ```python
-assert [i for i, _ in search("gas", index)] == [2, 0]   # most "gas" first, pizza not matched
-assert search("banana", index) == []                     # unknown word → no results
-assert search_tfidf(QUERY, ...)[0][0] == 0               # TF-IDF puts the junk email first
-assert search_bm25(QUERY, ...)[0][0] == 1                # BM25 puts the real email first
+assert sorted(i for i, _ in search("gas", index)) == [0, 2]   # pizza not matched
+assert search("banana", index) == []                           # unknown word → no results
+assert bim[0][1] == bim[1][1]                                  # BIM ignores repeats → a tie
+assert search_tfidf(QUERY, ...)[0][0] == 0                     # TF-IDF: tiny "Explosion"
+assert search_bim(QUERY, ...)[0][0] == 2                       # BIM: long newsletter
+assert search_bm25(QUERY, ...)[0][0] == 1                      # BM25: the real report
 ```
-The loop `for build, search in [(build_tfidf_index, search_tfidf), (build_bm25_index, search_bm25)]`
-runs the same checks on both algorithms — functions can be stored in lists like any other value.
+The loop `for build, search in [(build_tfidf_index, search_tfidf), (build_bm25_index, search_bm25), (build_bm25_index, search_bim)]`
+runs the same checks on all three algorithms — functions can be stored in lists like any other value.
 
 ---
 
@@ -422,12 +477,12 @@ No — they're from scikit-learn. They do tokenising, stop-word removal, buildin
 We used them because they're standard and fast. The same logic can be written in a few lines with `Counter` (section 1.1).
 
 **Q: Then what did you implement?**
-Email parsing and duplicate removal, the search functions, the **complete BM25 formula** (IDF, saturation with k1,
-length normalisation with b, scoring via the inverted index), the shared ranking function, saving/loading the index,
+Email parsing and duplicate removal, the search functions, the **complete BIM formula** (present/absent + IDF),
+the **complete BM25 formula** (IDF, saturation with k1, length normalisation with b, scoring via the inverted index), the shared ranking function, saving/loading the index,
 and the web app with safe highlighting.
 
-**Q: Why CountVectorizer for BM25 and TfidfVectorizer for TF-IDF?**
-BM25 needs **raw counts** and its own IDF formula. `TfidfVectorizer` already applies scikit-learn's IDF and normalisation,
+**Q: Why CountVectorizer for BIM and BM25 and TfidfVectorizer for TF-IDF?**
+BIM and BM25 need **raw counts** and their own IDF formula. `TfidfVectorizer` already applies scikit-learn's IDF and normalisation,
 which would be wrong for BM25.
 
 **Q: What's the difference between `fit_transform` and `transform`?**
@@ -436,3 +491,10 @@ to convert a query — so the query's columns line up with the emails' columns.
 
 **Q: Why `.tocsc()`?**
 BM25 looks up one word at a time. CSC stores the matrix column by column, so getting "all emails containing this word" is instant — it's an inverted index.
+
+**Q: How is BIM different from BM25 in your code?**
+Same loop, same index, same IDF. BIM reads only `column.indices` (which emails contain the word) and adds the IDF.
+BM25 also reads `column.data` (how many times) and `doc_len`, and applies `k1` and `b`. Setting `k1 = 0` in BM25 gives BIM.
+
+**Q: Why does BIM not need its own index?**
+It only needs "which emails contain this word?", and the BM25 CSC matrix already answers that. Adding BIM didn't require rebuilding `index.pkl`.

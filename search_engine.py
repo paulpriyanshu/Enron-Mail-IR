@@ -47,6 +47,31 @@ def search_tfidf(query, index):
     return rank(scores)
 
 
+# ---------- BIM (Binary Independence Model) ----------
+
+def search_bim(query, index):
+    """
+    score(email) = sum of IDF(word) over query words the email contains.
+
+    Binary: a word is either present (1) or absent (0) - repeats and email
+    length are ignored. Uses the BM25 index (it already knows which emails
+    contain each word). Same IDF as BM25, so BM25 = BIM + tf + length.
+    """
+    counter, counts, doc_len = index
+    n_emails = counts.shape[0]
+    scores = np.zeros(n_emails)
+
+    for word in counter.build_analyzer()(query):
+        col = counter.vocabulary_.get(word)
+        if col is None:
+            continue
+        rows = counts[:, col].indices  # emails containing the word (tf not used)
+        df = len(rows)
+        scores[rows] += np.log((n_emails - df + 0.5) / (df + 0.5) + 1)
+
+    return rank(scores)
+
+
 # ---------- BM25 ----------
 
 def build_bm25_index(emails):
